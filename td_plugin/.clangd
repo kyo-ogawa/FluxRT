@@ -1,0 +1,9 @@
+CompileFlags:
+  Add:
+    - "-IC:/Users/ogawa/Work/Demo/FluxRT/td_plugin/TD_SDK"
+    - "-IC:/Users/ogawa/Work/Demo/FluxRT/td_plugin/src"
+    - "-std=c++17"
+    - "-DWIN32_LEAN_AND_MEAN"
+    - "-DNOMINMAX"
+    - "-DWIN32"
+    - "-D_WINDOWS"
