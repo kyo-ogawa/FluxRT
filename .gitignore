@@ -6,3 +6,10 @@ __pycache__/
 *.pdb
 *.exp
 *.lib
+*.dll
+download_flux.log
+download_int8.log
+FLUX.2-klein-4B/
+FLUX.2-klein-4B-int8/
+RIFE-safetensors/
+docs/

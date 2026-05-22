@@ -73,14 +73,31 @@ def log(msg: str) -> None:
     print(f"[FluxRT] {msg}", flush=True)
 
 
+def _get_dshow_device_names() -> list[str]:
+    if platform.system() != "Windows":
+        return []
+    import subprocess, re
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=5,
+        )
+        return re.findall(r'"(.+?)" \(video\)', result.stderr)
+    except Exception:
+        return []
+
+
 def enumerate_cameras() -> list[tuple[int, str]]:
+    dshow_names = _get_dshow_device_names()
     found = []
-    for i in range(MAX_CAM_INDEX):
+    for i in range(max(MAX_CAM_INDEX, len(dshow_names))):
         cap = cv2.VideoCapture(i, CAM_BACKEND)
         if not cap.isOpened() and CAM_BACKEND_FALLBACK is not None:
             cap = cv2.VideoCapture(i, CAM_BACKEND_FALLBACK)
         if cap.isOpened():
-            found.append((i, f"Camera {i}"))
+            name = dshow_names[i] if i < len(dshow_names) else f"Camera {i}"
+            found.append((i, name))
             cap.release()
     return found
 
@@ -567,8 +584,8 @@ class MainWindow(QMainWindow):
         cams = enumerate_cameras()
         self._cam_combo.clear()
         if cams:
-            for _, lbl in cams:
-                self._cam_combo.addItem(lbl)
+            for idx, lbl in cams:
+                self._cam_combo.addItem(lbl, userData=idx)
             self._cam_err_lbl.setText("")
             log(f"Cameras found: {[lbl for _, lbl in cams]}")
         else:
@@ -576,6 +593,10 @@ class MainWindow(QMainWindow):
             log("No cameras found")
 
     def _selected_cam_index(self) -> int | None:
+        idx = self._cam_combo.currentData()
+        if idx is not None:
+            return idx
+        # fallback for items added without userData
         val = self._cam_combo.currentText()
         if not val:
             return None
