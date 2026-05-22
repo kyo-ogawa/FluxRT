@@ -1,8 +1,6 @@
 #include "FluxRTTop.h"
 #include <cstring>
 #include <cstdio>
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 
 using namespace TD;
 
