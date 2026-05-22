@@ -149,10 +149,102 @@ def main():
 
 def _run_inference(args, w, h, shm_in, shm_out, ctrl: CtrlBlock):
     """Load StreamProcessor and run the main frame loop."""
-    # (implemented in Task 3)
-    ctrl.status = STATUS_RUNNING
-    while not ctrl.shutdown_flag:
-        time.sleep(0.01)
+    import json
+    import os
+    import tempfile
+
+    import numpy as np
+    from PIL import Image
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from fluxrt import StreamProcessor
+
+    with open(args.config) as f:
+        cfg = json.load(f)
+
+    # Override resolution — config uses "resolution": {"height": H, "width": W}
+    if "resolution" in cfg:
+        cfg["resolution"]["width"]  = w
+        cfg["resolution"]["height"] = h
+    else:
+        cfg["resolution"] = {"width": w, "height": h}
+
+    if args.int8:
+        cfg["enable_int8_quantization"] = True
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+        json.dump(cfg, tmp)
+        tmp_config = tmp.name
+
+    try:
+        ctrl.status = STATUS_LOADING
+        sp = StreamProcessor(tmp_config)
+        if args.int8:
+            sp.enable_quantization()
+
+        ctrl.status = STATUS_COMPILING
+        sp.start()
+
+        input_tensor  = sp.get_input_tensor()
+        output_tensor = sp.get_output_tensor()
+
+        # Warm up: write a black frame and wait for first output (TorchInductor compile)
+        dummy = np.zeros((h, w, 3), dtype=np.uint8)
+        input_tensor.copy_from(dummy)
+        while not sp.is_ready() and not ctrl.shutdown_flag:
+            time.sleep(0.5)
+
+        ctrl.status = STATUS_RUNNING
+
+        # numpy views over shared memory (no extra copy)
+        in_arr  = np.ndarray((h, w, 3), dtype=np.uint8, buffer=shm_in.buf)
+        out_arr = np.ndarray((h, w, 3), dtype=np.uint8, buffer=shm_out.buf)
+
+        # Parameter snapshot for change detection
+        last_prompt = ""
+        last_steps  = -1
+        last_seed   = -1
+        last_ref    = ""
+
+        sp.set_prompt(ctrl.prompt or cfg.get("default_prompt", "Turn this into oil on canvas art"))
+
+        while not ctrl.shutdown_flag:
+            p = ctrl.prompt
+            if p != last_prompt:
+                sp.set_prompt(p)
+                last_prompt = p
+
+            s = ctrl.steps
+            if s > 0 and s != last_steps:
+                sp.set_steps(s)
+                last_steps = s
+
+            seed = ctrl.seed
+            if seed != last_seed and seed > 0:
+                sp.set_seed(seed)
+                last_seed = seed
+
+            ref = ctrl.reference_image_path
+            if ref != last_ref and ctrl.use_reference:
+                if ref and os.path.isfile(ref):
+                    img = np.array(Image.open(ref).convert("RGB"))
+                    sp.set_reference_image(img)
+                elif not ref:
+                    sp.set_reference_image(None)
+                last_ref = ref
+
+            if ctrl.input_ready:
+                input_tensor.copy_from(in_arr)
+                ctrl.input_ready = False
+
+            out = output_tensor.to_numpy()
+            np.copyto(out_arr, out)
+            ctrl.output_ready = True
+
+            time.sleep(0.001)
+    finally:
+        sp.stop()
+        os.unlink(tmp_config)
 
 
 if __name__ == "__main__":
