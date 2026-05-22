@@ -1,6 +1,9 @@
 #include "FluxRTTop.h"
 #include <cstring>
 #include <sstream>
+#include <cstdio>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 
 using namespace TD;
 
@@ -188,21 +191,113 @@ void FluxRTTop::pulsePressed(const char* name, void*) {
     }
 }
 
-void FluxRTTop::doLoad(const OP_Inputs*) {
+void FluxRTTop::doLoad(const OP_Inputs* inputs) {
+    if (launcher_.isRunning()) doUnload();
+
+    const char* pyExe      = inputs->getParString("Pythonexe");
+    const char* cfgPath    = inputs->getParString("Configpath");
+    const char* resStr     = inputs->getParString("Resolution");
+    const char* workDirPar = inputs->getParString("Workdir");
+    int8_ = inputs->getParInt("Int8mode") != 0;
+
+    // Parse resolution "WxH"
+    width_ = 576; height_ = 320;
+    if (resStr) {
+        int w = 0, h = 0;
+        if (sscanf_s(resStr, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+            width_ = w; height_ = h;
+        }
+    }
+    inputBGRA_.resize((size_t)width_ * height_ * 4);
+    outputBGRA_.resize((size_t)width_ * height_ * 4, 0);
+
+    // Server script lives next to the DLL
+    char dllPath[MAX_PATH] = {};
+    HMODULE hMod = nullptr;
+    GetModuleHandleExA(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCSTR>(&FillTOPPluginInfo), &hMod);
+    GetModuleFileNameA(hMod, dllPath, MAX_PATH);
+    std::string dllDir = dllPath;
+    dllDir = dllDir.substr(0, dllDir.find_last_of("\\/"));
+    std::string serverScript = dllDir + "\\fluxrt_server.py";
+
+    std::string workDir = (workDirPar && workDirPar[0]) ? workDirPar : dllDir;
+
+    LaunchConfig cfg;
+    cfg.pythonExe    = pyExe    ? pyExe    : "";
+    cfg.serverScript = serverScript;
+    cfg.workDir      = workDir;
+    cfg.configPath   = cfgPath  ? cfgPath  : "configs/config_with_reference.json";
+    cfg.width        = width_;
+    cfg.height       = height_;
+    cfg.int8         = int8_;
+
+    // 10-minute timeout for first compile
+    running_ = launcher_.launch(cfg, 600000);
+    if (running_) syncParams(inputs);
 }
 
 void FluxRTTop::doUnload() {
-    if (launcher_.isRunning()) {
-        launcher_.stop();
-    }
     running_ = false;
+    launcher_.stop();
+    prevDownRes_ = TD::OP_SmartRef<TD::OP_TOPDownloadResult>();
 }
 
-void FluxRTTop::syncParams(const OP_Inputs*) {
+void FluxRTTop::syncParams(const OP_Inputs* inputs) {
+    if (!launcher_.isRunning()) return;
+    FluxRTCtrl* ctrl = launcher_.ctrl();
+    if (!ctrl) return;
+
+    const char* prompt = inputs->getParString("Prompt");
+    if (prompt && std::string(prompt) != lastPrompt_) {
+        ctrl_set_str(ctrl->prompt, prompt);
+        lastPrompt_ = prompt;
+    }
+
+    int steps = inputs->getParInt("Steps");
+    if (steps != lastSteps_) {
+        ctrl->steps = steps;
+        lastSteps_  = steps;
+    }
+
+    int seed = inputs->getParInt("Seed");
+    if (seed != lastSeed_) {
+        ctrl->seed = seed;
+        lastSeed_  = seed;
+    }
+
+    float dynArea = static_cast<float>(inputs->getParDouble("Dynamicarea"));
+    if (dynArea != lastDynArea_) {
+        ctrl->dynamic_area = dynArea;
+        lastDynArea_ = dynArea;
+    }
+
+    bool useRef = inputs->getParInt("Usereference") != 0;
+    if (useRef != lastUseRef_) {
+        ctrl->use_reference = useRef ? 1 : 0;
+        lastUseRef_ = useRef;
+    }
+
+    const char* refPath = inputs->getParString("Referenceimage");
+    if (refPath && std::string(refPath) != lastRefPath_) {
+        ctrl_set_str(ctrl->reference_image_path, refPath);
+        lastRefPath_ = refPath;
+    }
 }
 
 std::string FluxRTTop::statusString() const {
-    return "idle";
+    if (!launcher_.isRunning()) return "Unloaded";
+    const FluxRTCtrl* ctrl = const_cast<ProcessLauncher&>(launcher_).ctrl();
+    if (!ctrl) return "Error: no ctrl";
+    switch (ctrl->status) {
+        case FLUXRT_STATUS_LOADING:   return "Loading...";
+        case FLUXRT_STATUS_COMPILING: return "Compiling (first run ~3 min)...";
+        case FLUXRT_STATUS_RUNNING:   return "Running";
+        case FLUXRT_STATUS_ERROR:     return std::string("Error: ") + ctrl->error_msg;
+        default:                      return "Unknown";
+    }
 }
 
 /*static*/ void FluxRTTop::bgraToShm(const uint8_t* bgra, uint8_t* bgr, int w, int h) {
