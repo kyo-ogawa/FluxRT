@@ -116,11 +116,37 @@ void FluxRTTop::execute(TOP_Output* output, const OP_Inputs* inputs, void*) {
     }
 }
 
-bool FluxRTTop::getInfoDATSize(OP_InfoDATSize*, void*) {
-    return false;
+bool FluxRTTop::getInfoDATSize(OP_InfoDATSize* infoSize, void*) {
+    infoSize->rows     = 4;
+    infoSize->cols     = 2;
+    infoSize->byColumn = false;
+    return true;
 }
 
-void FluxRTTop::getInfoDATEntries(int32_t, int32_t, OP_InfoDATEntries*, void*) {
+void FluxRTTop::getInfoDATEntries(int32_t index, int32_t,
+                                   OP_InfoDATEntries* entries, void*) {
+    char buf[256];
+    switch (index) {
+    case 0:
+        entries->values[0]->setString("status");
+        entries->values[1]->setString(statusString().c_str());
+        break;
+    case 1:
+        sprintf_s(buf, "%d x %d", width_, height_);
+        entries->values[0]->setString("resolution");
+        entries->values[1]->setString(buf);
+        break;
+    case 2:
+        entries->values[0]->setString("shm_input");
+        entries->values[1]->setString(
+            launcher_.isRunning() ? launcher_.inputShmName().c_str() : "");
+        break;
+    case 3:
+        sprintf_s(buf, "%d", execCount_);
+        entries->values[0]->setString("exec_count");
+        entries->values[1]->setString(buf);
+        break;
+    }
 }
 
 void FluxRTTop::setupParameters(OP_ParameterManager* manager, void*) {
