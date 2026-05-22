@@ -1,6 +1,5 @@
 #include "FluxRTTop.h"
 #include <cstring>
-#include <sstream>
 #include <cstdio>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -289,7 +288,7 @@ void FluxRTTop::syncParams(const OP_Inputs* inputs) {
 
 std::string FluxRTTop::statusString() const {
     if (!launcher_.isRunning()) return "Unloaded";
-    const FluxRTCtrl* ctrl = const_cast<ProcessLauncher&>(launcher_).ctrl();
+    const FluxRTCtrl* ctrl = launcher_.ctrl();
     if (!ctrl) return "Error: no ctrl";
     switch (ctrl->status) {
         case FLUXRT_STATUS_LOADING:   return "Loading...";
