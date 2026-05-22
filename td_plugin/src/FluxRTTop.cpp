@@ -2,6 +2,8 @@
 #include <cstring>
 #include <sstream>
 
+using namespace TD;
+
 extern "C" {
 
 DLLEXPORT void FillTOPPluginInfo(TOP_PluginInfo* info) {

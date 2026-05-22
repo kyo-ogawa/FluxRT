@@ -6,37 +6,35 @@
 #include <vector>
 #include <atomic>
 
-using namespace TD;
-
-class FluxRTTop : public TOP_CPlusPlusBase {
+class FluxRTTop : public TD::TOP_CPlusPlusBase {
 public:
-    FluxRTTop(const OP_NodeInfo* info, TOP_Context* context);
+    FluxRTTop(const TD::OP_NodeInfo* info, TD::TOP_Context* context);
     virtual ~FluxRTTop();
 
     // ── TOP interface ─────────────────────────────────────────────────────
-    void        getGeneralInfo(TOP_GeneralInfo*, const OP_Inputs*, void*) override;
-    void        execute(TOP_Output*, const OP_Inputs*, void*) override;
+    void        getGeneralInfo(TD::TOP_GeneralInfo*, const TD::OP_Inputs*, void*) override;
+    void        execute(TD::TOP_Output*, const TD::OP_Inputs*, void*) override;
 
     // ── Info DAT ──────────────────────────────────────────────────────────
-    bool        getInfoDATSize(OP_InfoDATSize*, void*) override;
-    void        getInfoDATEntries(int32_t, int32_t, OP_InfoDATEntries*, void*) override;
+    bool        getInfoDATSize(TD::OP_InfoDATSize*, void*) override;
+    void        getInfoDATEntries(int32_t, int32_t, TD::OP_InfoDATEntries*, void*) override;
 
     // ── Parameters ────────────────────────────────────────────────────────
-    void        setupParameters(OP_ParameterManager*, void*) override;
+    void        setupParameters(TD::OP_ParameterManager*, void*) override;
     void        pulsePressed(const char* name, void*) override;
 
 private:
-    void doLoad(const OP_Inputs* inputs);
+    void doLoad(const TD::OP_Inputs* inputs);
     void doUnload();
-    void syncParams(const OP_Inputs* inputs);
+    void syncParams(const TD::OP_Inputs* inputs);
     std::string statusString() const;
 
     static void bgraToShm(const uint8_t* bgra, uint8_t* bgr, int w, int h);
     static void shmToBgra(const uint8_t* bgr, uint8_t* bgra, int w, int h);
 
-    const OP_NodeInfo*  myNodeInfo_;
-    TOP_Context*        myContext_;
-    ProcessLauncher     launcher_;
+    const TD::OP_NodeInfo*  myNodeInfo_;
+    TD::TOP_Context*        myContext_;
+    ProcessLauncher         launcher_;
 
     int  width_  = 576;
     int  height_ = 320;
@@ -45,7 +43,7 @@ private:
     std::vector<uint8_t>  inputBGRA_;
     std::vector<uint8_t>  outputBGRA_;
 
-    OP_SmartRef<OP_TOPDownloadResult> prevDownRes_;
+    TD::OP_SmartRef<TD::OP_TOPDownloadResult> prevDownRes_;
 
     std::string lastPrompt_;
     int         lastSteps_    = -1;
