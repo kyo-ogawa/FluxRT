@@ -49,8 +49,73 @@ void FluxRTTop::getGeneralInfo(TOP_GeneralInfo* ginfo, const OP_Inputs*, void*) 
 
 // ── Stubs — implemented in later tasks ────────────────────────────────────────
 
-void FluxRTTop::execute(TOP_Output*, const OP_Inputs*, void*) {
+void FluxRTTop::execute(TOP_Output* output, const OP_Inputs* inputs, void*) {
     ++execCount_;
+
+    // ── 1. Deferred Load ─────────────────────────────────────────────────────
+    if (loadRequested_) {
+        loadRequested_ = false;
+        doLoad(inputs);
+    }
+
+    // ── 2. Sync params ───────────────────────────────────────────────────────
+    if (running_) {
+        syncParams(inputs);
+    }
+
+    // ── 3. Check if process died ─────────────────────────────────────────────
+    if (running_ && !launcher_.isRunning()) {
+        running_ = false;
+    }
+
+    FluxRTCtrl* ctrl = running_ ? launcher_.ctrl() : nullptr;
+
+    // ── 4. Input pipeline ────────────────────────────────────────────────────
+    // We use a one-frame-delayed download to avoid a CPU stall:
+    //   Frame N: issue downloadTexture() → result will be ready by Frame N+1
+    //   Frame N+1: read last frame's result, write BGR into shared-mem input
+    const OP_TOPInput* topInput = inputs->getInputTOP(0);
+    if (topInput && running_ && ctrl) {
+        // Consume the *previous* download result (ready by now)
+        if (prevDownRes_) {
+            void* rawData = prevDownRes_->getData();
+            if (rawData) {
+                // Convert BGRA → BGR directly into the shm input buffer
+                bgraToShm(static_cast<const uint8_t*>(rawData),
+                          launcher_.input(), width_, height_);
+                ctrl->input_ready = 1;
+            }
+        }
+
+        // Issue a new download; result will be consumed next frame
+        OP_TOPInputDownloadOptions opts;
+        opts.pixelFormat  = OP_PixelFormat::BGRA8Fixed;
+        opts.verticalFlip = false;
+        prevDownRes_ = topInput->downloadTexture(opts, nullptr);
+    }
+
+    // ── 5. Output pipeline ───────────────────────────────────────────────────
+    if (running_ && ctrl && ctrl->output_ready) {
+        shmToBgra(launcher_.output(), outputBGRA_.data(), width_, height_);
+        ctrl->output_ready = 0;
+    }
+
+    // ── 6. Upload outputBGRA_ to TD texture (black until first frame arrives) ─
+    const uint64_t byteSize = (uint64_t)width_ * height_ * 4;
+
+    TOP_UploadInfo info;
+    info.textureDesc.width       = (uint32_t)width_;
+    info.textureDesc.height      = (uint32_t)height_;
+    info.textureDesc.texDim      = OP_TexDim::e2D;
+    info.textureDesc.pixelFormat = OP_PixelFormat::BGRA8Fixed;
+    info.colorBufferIndex        = 0;
+
+    OP_SmartRef<TOP_Buffer> buf =
+        myContext_->createOutputBuffer(byteSize, TOP_BufferFlags::None, nullptr);
+    if (buf) {
+        memcpy(buf->data, outputBGRA_.data(), byteSize);
+        output->uploadBuffer(&buf, info, nullptr);
+    }
 }
 
 bool FluxRTTop::getInfoDATSize(OP_InfoDATSize*, void*) {
