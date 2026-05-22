@@ -145,6 +145,10 @@ def test_server_creates_valid_shm():
         shm_ctrl = shared_memory.SharedMemory(name=names["FLUXRT_CTRL"])
         assert shm_ctrl.size == 4096
         shm_ctrl.close()
+
+        shm_out = shared_memory.SharedMemory(name=names["FLUXRT_OUTPUT"])
+        assert shm_out.size == 64 * 64 * 3
+        shm_out.close()
     finally:
         proc.terminate()
         proc.wait(timeout=5)
