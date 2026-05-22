@@ -74,8 +74,10 @@ void FluxRTTop::execute(TOP_Output* output, const OP_Inputs* inputs, void*) {
     //   Frame N+1: read last frame's result, write BGR into shared-mem input
     const OP_TOPInput* topInput = inputs->getInputTOP(0);
     if (topInput && running_ && ctrl) {
-        // Consume the *previous* download result (ready by now)
-        if (prevDownRes_) {
+        // Consume the *previous* download result (ready by now),
+        // but only if Python has already cleared the previous frame (input_ready==0).
+        // Skipping when input_ready==1 prevents torn frames under slow inference.
+        if (prevDownRes_ && ctrl->input_ready == 0) {
             void* rawData = prevDownRes_->getData();
             if (rawData) {
                 // Convert BGRA → BGR directly into the shm input buffer
@@ -163,13 +165,6 @@ void FluxRTTop::setupParameters(OP_ParameterManager* manager, void*) {
         np.label = "Unload";
         np.page  = "Setup";
         manager->appendPulse(np);
-    }
-    {
-        OP_StringParameter sp("Status");
-        sp.label        = "Status";
-        sp.page         = "Setup";
-        sp.defaultValue = "Unloaded";
-        manager->appendString(sp);
     }
     {
         OP_StringParameter sp("Pythonexe");
