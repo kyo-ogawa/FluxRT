@@ -14,10 +14,15 @@
     "target_fps":null,
     "interpolation_exp": 2,
     "use_reference_image": true,
+    "num_reference_images": 1,
     "reference_image_path": "local_samples/reference.png",
     "reference_image_resolution": {
         "height" : 256,
         "width" : 256
     },
-    "logging": false
+    "logging": false,
+    "lip_transfer": {
+        "enable": true,
+        "models_dir": "LivePortrait/liveportrait"
+    }
 }

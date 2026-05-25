@@ -84,12 +84,12 @@ class StreamProcessor:
     def set_param(self, name: str, value) -> None:
         self.model_inference_subprocess.set_param(name=name, value=value)
 
-    def set_reference_image(self, image: np.ndarray | None) -> None:
+    def set_reference_image(self, image: np.ndarray | None, index: int = 0) -> None:
         if not self.config.get("use_reference_image", False):
             raise ValueError(
                 "set_reference_image called but use_reference_image is not enabled in the config"
             )
-        self.model_inference_subprocess.set_reference_image(image)
+        self.model_inference_subprocess.set_reference_image(image, index)
 
     def set_mask(self, mask: np.ndarray) -> None:
         if self.config.get("mask_calculation_method", "auto") != "manual":

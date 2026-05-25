@@ -157,9 +157,10 @@ class ModelInferenceSubprocess:
         reference_image_seq_len = None
         if self.config["use_reference_image"]:
             reference_image_res = self.config["reference_image_resolution"]
+            num_refs = self.config.get("num_reference_images", 1)
             reference_image_seq_len = (reference_image_res["width"] // 16) * (
                 reference_image_res["height"] // 16
-            )
+            ) * num_refs
 
         self.update_controller = UpdateController(
             self.config,
@@ -227,8 +228,9 @@ class ModelInferenceSubprocess:
         self.previous_frame = None
 
         if self.config.get("use_reference_image", False):
-            image = cv2.imread(self.config.get("reference_image_path", ""))
+            num_refs = self.config.get("num_reference_images", 1)
             resolution = self.config.get("reference_image_resolution")
+            image = cv2.imread(self.config.get("reference_image_path", ""))
             if image is None:
                 image = np.zeros(
                     (resolution["height"], resolution["width"], 3), dtype=np.uint8
@@ -239,7 +241,8 @@ class ModelInferenceSubprocess:
             else:
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 image = cv2.resize(image, (resolution["width"], resolution["height"]))
-            self.reference_image = Image.fromarray(image)
+            base = Image.fromarray(image)
+            self.reference_images: list = [base] * num_refs
 
         target_fps = self.config.get("target_fps", None)
         self.target_base_processing_time = None
@@ -260,17 +263,18 @@ class ModelInferenceSubprocess:
     def set_param(self, name: str, value) -> None:
         self.command_queue.put(("set_param", (name, value)))
 
-    def set_reference_image(self, image: np.ndarray | None) -> None:
+    def set_reference_image(self, image: np.ndarray | None, index: int = 0) -> None:
         """
-        Update the reference image on the fly.
-        image: numpy uint8 RGB array
+        Update one reference image on the fly.
+        image: numpy uint8 RGB array, or None to clear
+        index: which slot to update (0-based, must be < num_reference_images)
         Only valid when use_reference_image is true in config.
         """
         if not self.config.get("use_reference_image", False):
             raise ValueError(
                 "set_reference_image called but use_reference_image is not enabled in the stream processor config"
             )
-        self.command_queue.put(("set_reference_image", image))
+        self.command_queue.put(("set_reference_image", (image, index)))
 
     def set_mask(self, mask) -> None:
         """
@@ -300,15 +304,15 @@ class ModelInferenceSubprocess:
                     if name == "prompt":
                         self.update_prompt_embeds(value)
                 elif cmd == "set_reference_image":
-                    image = payload  # numpy uint8 RGB array or None
+                    image, index = payload
                     resolution = self.config["reference_image_resolution"]
                     if image is not None:
                         image = cv2.resize(
                             image, (resolution["width"], resolution["height"])
                         )
-                        self.reference_image = Image.fromarray(image)
+                        self.reference_images[index] = Image.fromarray(image)
                     else:
-                        self.reference_image = Image.fromarray(
+                        self.reference_images[index] = Image.fromarray(
                             np.zeros(
                                 (resolution["height"], resolution["width"], 3),
                                 dtype=np.uint8,
@@ -421,7 +425,7 @@ class ModelInferenceSubprocess:
 
         reference_list = [input_frame]
         if self.config["use_reference_image"]:
-            reference_list.append(self.reference_image)
+            reference_list.extend(self.reference_images)
 
         out = self.pipe(
             prompt_embeds=self.prompt_embeds,
