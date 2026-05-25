@@ -1,0 +1,3 @@
+[submodule "td_plugin"]
+	path = td_plugin
+	url = https://github.com/kyo-ogawa/FluxRT-TD-Plugin.git
