@@ -305,6 +305,11 @@ class ModelInferenceSubprocess:
                         self.update_prompt_embeds(value)
                 elif cmd == "set_reference_image":
                     image, index = payload
+                    if index >= len(self.reference_images):
+                        print(f"Warning: reference image index {index} out of range "
+                              f"(num_reference_images={len(self.reference_images)}), ignoring. "
+                              f"Increase num_reference_images in config.")
+                        continue
                     resolution = self.config["reference_image_resolution"]
                     if image is not None:
                         image = cv2.resize(
