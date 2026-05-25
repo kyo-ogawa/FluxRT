@@ -47,12 +47,17 @@ FluxRTTop::~FluxRTTop() {
     if (installProcess_) {
         TerminateProcess(installProcess_, 1);
         CloseHandle(installProcess_);
+        installProcess_ = nullptr;
+    }
+    if (installStdoutRead_) {
+        CloseHandle(installStdoutRead_);
+        installStdoutRead_ = nullptr;
     }
     if (installThread_) {
-        WaitForSingleObject(installThread_, 2000);
+        WaitForSingleObject(installThread_, 5000);
         CloseHandle(installThread_);
+        installThread_ = nullptr;
     }
-    if (installStdoutRead_) CloseHandle(installStdoutRead_);
 }
 
 // ── General info ──────────────────────────────────────────────────────────────
@@ -73,7 +78,8 @@ void FluxRTTop::execute(TOP_Output* output, const OP_Inputs* inputs, void*) {
     if (installRequested_.exchange(false)) {
         doInstall(inputs);
     }
-    if (loadRequested_.exchange(false) && !installing_) {
+    if (loadRequested_ && !installing_) {
+        loadRequested_ = false;
         doLoad(inputs);
     }
 
