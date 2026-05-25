@@ -23,7 +23,8 @@ struct FluxRTCtrl {
     uint8_t output_ready;               // byte  1551  Python→C++
     uint8_t status;                     // byte  1552  Python→C++
     char    error_msg[256];             // bytes 1553–1808
-    uint8_t _pad[2287];                 // bytes 1809–4095
+    uint8_t lip_transfer_enable;        // byte  1809  C++→Python
+    uint8_t _pad[2286];                 // bytes 1810–4095
 };
 #pragma pack(pop)
 static_assert(sizeof(FluxRTCtrl) == 4096, "FluxRTCtrl must be exactly 4096 bytes");

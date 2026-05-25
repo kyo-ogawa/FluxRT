@@ -59,6 +59,21 @@ def test_ctrl_status_write():
     shm.unlink()
 
 
+def test_ctrl_lip_transfer_enable():
+    import os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from td_plugin.fluxrt_server import CtrlBlock
+    shm = _make_ctrl_shm()
+    ctrl = CtrlBlock(shm)
+    assert ctrl.lip_transfer_enable is False   # zero-initialised
+    shm.buf[1809] = 1
+    assert ctrl.lip_transfer_enable is True
+    shm.buf[1809] = 0
+    assert ctrl.lip_transfer_enable is False
+    shm.close()
+    shm.unlink()
+
+
 # ── Subprocess protocol tests ─────────────────────────────────────────────
 
 def _find_config():
