@@ -245,6 +245,7 @@ def _run_inference(args, w, h, shm_in, shm_out, ctrl: CtrlBlock,
         last_steps  = -1
         last_seed   = -1
         last_ref    = ""
+        last_lip    = False
 
         initial_prompt = ctrl.prompt or cfg.get("default_prompt", "Turn this into oil on canvas art")
         sp.set_prompt(initial_prompt)
@@ -285,6 +286,12 @@ def _run_inference(args, w, h, shm_in, shm_out, ctrl: CtrlBlock,
                     sp.set_reference_image(None)
                     log.info("Reference image cleared")
                 last_ref = ref
+
+            lip = ctrl.lip_transfer_enable
+            if lip != last_lip:
+                sp.set_lip_transfer(lip)
+                last_lip = lip
+                log.info("LipTransfer → %s", lip)
 
             # ── Input frame ──────────────────────────────────────────────
             if ctrl.input_ready:
