@@ -31,10 +31,14 @@ private:
 
     static void bgraToShm(const uint8_t* bgra, uint8_t* bgr, int w, int h);
     static void shmToBgra(const uint8_t* bgr, uint8_t* bgra, int w, int h);
+    static bool saveBgr24Bmp(const uint8_t* bgra, int w, int h,
+                              const std::string& path);
 
     const TD::OP_NodeInfo*  myNodeInfo_;
     TD::TOP_Context*        myContext_;
     ProcessLauncher         launcher_;
+
+    std::string workDir_;  // stored in doLoad() for temp file paths
 
     int  width_  = 576;
     int  height_ = 320;
@@ -49,10 +53,24 @@ private:
     int         lastSteps_    = -1;
     int         lastSeed_     = -1;
     float       lastDynArea_  = -1.f;
-    bool        lastUseRef_   = false;
+    bool        lastUseRef_      = false;
+    bool        lastLipTransfer_ = false;
     std::string lastRefPath_;
 
-    std::atomic<bool> running_  {false};
-    bool              loadRequested_ = false;
-    int               execCount_     = 0;
+    std::atomic<bool> running_         {false};
+    std::atomic<bool> loadRequested_   {false};
+    std::atomic<bool> unloadRequested_ {false};
+    int               execCount_       = 0;
+
+    // Input diagnostic (updated each frame)
+    int  lastInputW_        = 0;
+    int  lastInputH_        = 0;
+    bool lastInputAccepted_ = false;
+
+    // Reference TOP (input 1)
+    int64_t lastRefTotalCooks_ = -1;
+    int     refGeneration_     = 0;
+    TD::OP_SmartRef<TD::OP_TOPDownloadResult> prevRefDownRes_;
+    std::string tempRefBmpPath_;
+    std::string prevRefBmpPath_;
 };

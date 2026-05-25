@@ -15,7 +15,7 @@ DLLEXPORT void FillTOPPluginInfo(TOP_PluginInfo* info) {
     info->customOPInfo.authorName->setString("FluxRT Project");
     info->customOPInfo.authorEmail->setString("ogawa@bassdrum.org");
     info->customOPInfo.minInputs          = 0;
-    info->customOPInfo.maxInputs          = 1;
+    info->customOPInfo.maxInputs          = 2;
 }
 
 DLLEXPORT TOP_CPlusPlusBase* CreateTOPInstance(const OP_NodeInfo* info, TOP_Context* ctx) {
@@ -33,6 +33,7 @@ DLLEXPORT void DestroyTOPInstance(TOP_CPlusPlusBase* instance, TOP_Context*) {
 FluxRTTop::FluxRTTop(const OP_NodeInfo* info, TOP_Context* context)
     : myNodeInfo_(info), myContext_(context)
 {
+    outputBGRA_.resize((size_t)width_ * height_ * 4, 0);
 }
 
 FluxRTTop::~FluxRTTop() {
@@ -50,9 +51,11 @@ void FluxRTTop::getGeneralInfo(TOP_GeneralInfo* ginfo, const OP_Inputs*, void*) 
 void FluxRTTop::execute(TOP_Output* output, const OP_Inputs* inputs, void*) {
     ++execCount_;
 
-    // ── 1. Deferred Load ─────────────────────────────────────────────────────
-    if (loadRequested_) {
-        loadRequested_ = false;
+    // ── 1. Deferred Load / Unload (processed on render thread to avoid races) ─
+    if (unloadRequested_.exchange(false)) {
+        doUnload();
+    }
+    if (loadRequested_.exchange(false)) {
         doLoad(inputs);
     }
 
@@ -64,6 +67,7 @@ void FluxRTTop::execute(TOP_Output* output, const OP_Inputs* inputs, void*) {
     // ── 3. Check if process died ─────────────────────────────────────────────
     if (running_ && !launcher_.isRunning()) {
         running_ = false;
+        launcher_.forceStop();  // close handles/mappings left by crashed process
     }
 
     FluxRTCtrl* ctrl = running_ ? launcher_.ctrl() : nullptr;
@@ -79,19 +83,77 @@ void FluxRTTop::execute(TOP_Output* output, const OP_Inputs* inputs, void*) {
         // Skipping when input_ready==1 prevents torn frames under slow inference.
         if (prevDownRes_ && ctrl->input_ready == 0) {
             void* rawData = prevDownRes_->getData();
-            if (rawData) {
-                // Convert BGRA → BGR directly into the shm input buffer
+            // Validate that the downloaded resolution matches our configured frame size
+            // to prevent out-of-bounds reads if the input TOP has a different resolution.
+            const bool dimOk = (prevDownRes_->textureDesc.width  == (uint32_t)width_ &&
+                                 prevDownRes_->textureDesc.height == (uint32_t)height_);
+            lastInputW_ = (int)prevDownRes_->textureDesc.width;
+            lastInputH_ = (int)prevDownRes_->textureDesc.height;
+            lastInputAccepted_ = (rawData && dimOk);
+            if (lastInputAccepted_) {
                 bgraToShm(static_cast<const uint8_t*>(rawData),
                           launcher_.input(), width_, height_);
                 ctrl->input_ready = 1;
             }
         }
 
-        // Issue a new download; result will be consumed next frame
+        // Issue a new download; result will be consumed next frame.
+        // verticalFlip=true gives top-down row order (row 0 = top) which
+        // matches what OpenCV-based models expect.
         OP_TOPInputDownloadOptions opts;
         opts.pixelFormat  = OP_PixelFormat::BGRA8Fixed;
-        opts.verticalFlip = false;
+        opts.verticalFlip = true;
         prevDownRes_ = topInput->downloadTexture(opts, nullptr);
+    }
+
+    // ── 4b. Reference TOP input (input 1) ───────────────────────────────────
+    // If a TOP is wired to input 1, it overrides the "Reference Image" file param.
+    // Uses the same 1-frame-delayed download pattern as the main input.
+    const OP_TOPInput* refTop = inputs->getInputTOP(1);
+    if (running_ && ctrl) {
+        if (refTop && ctrl->use_reference) {
+            // Consume previous reference download
+            if (prevRefDownRes_) {
+                void* rawData = prevRefDownRes_->getData();
+                if (rawData) {
+                    int rw = (int)prevRefDownRes_->textureDesc.width;
+                    int rh = (int)prevRefDownRes_->textureDesc.height;
+                    if (rw > 0 && rh > 0) {
+                        char tmpPath[MAX_PATH];
+                        sprintf_s(tmpPath, "%s\\fluxrt_ref_%d.bmp",
+                                  workDir_.c_str(), refGeneration_);
+                        if (saveBgr24Bmp(
+                                static_cast<const uint8_t*>(rawData),
+                                rw, rh, tmpPath)) {
+                            if (!prevRefBmpPath_.empty())
+                                DeleteFileA(prevRefBmpPath_.c_str());
+                            prevRefBmpPath_ = tempRefBmpPath_;
+                            tempRefBmpPath_ = tmpPath;
+                            ctrl_set_str(ctrl->reference_image_path, tmpPath);
+                            ++refGeneration_;
+                        }
+                    }
+                }
+                prevRefDownRes_ = OP_SmartRef<OP_TOPDownloadResult>();
+            }
+
+            // Issue new download when reference TOP updates
+            if (refTop->totalCooks != lastRefTotalCooks_) {
+                lastRefTotalCooks_ = refTop->totalCooks;
+                OP_TOPInputDownloadOptions refOpts;
+                refOpts.pixelFormat  = OP_PixelFormat::BGRA8Fixed;
+                refOpts.verticalFlip = false;  // bottom-up is fine for BMP
+                prevRefDownRes_ = refTop->downloadTexture(refOpts, nullptr);
+            }
+        } else if (!refTop) {
+            // TOP disconnected — reset state so file path param takes over
+            if (lastRefTotalCooks_ != -1) {
+                lastRefTotalCooks_  = -1;
+                prevRefDownRes_     = OP_SmartRef<OP_TOPDownloadResult>();
+                // Re-sync the file path param on next syncParams call
+                lastRefPath_.clear();
+            }
+        }
     }
 
     // ── 5. Output pipeline ───────────────────────────────────────────────────
@@ -108,6 +170,7 @@ void FluxRTTop::execute(TOP_Output* output, const OP_Inputs* inputs, void*) {
     info.textureDesc.height      = (uint32_t)height_;
     info.textureDesc.texDim      = OP_TexDim::e2D;
     info.textureDesc.pixelFormat = OP_PixelFormat::BGRA8Fixed;
+    info.firstPixel              = TOP_FirstPixel::TopLeft;  // model outputs top-down
     info.colorBufferIndex        = 0;
 
     OP_SmartRef<TOP_Buffer> buf =
@@ -119,7 +182,7 @@ void FluxRTTop::execute(TOP_Output* output, const OP_Inputs* inputs, void*) {
 }
 
 bool FluxRTTop::getInfoDATSize(OP_InfoDATSize* infoSize, void*) {
-    infoSize->rows     = 4;
+    infoSize->rows     = 7;
     infoSize->cols     = 2;
     infoSize->byColumn = false;
     return true;
@@ -147,6 +210,23 @@ void FluxRTTop::getInfoDATEntries(int32_t index, int32_t,
         sprintf_s(buf, "%d", execCount_);
         entries->values[0]->setString("exec_count");
         entries->values[1]->setString(buf);
+        break;
+    case 4:
+        entries->values[0]->setString("shm_output");
+        entries->values[1]->setString(
+            launcher_.isRunning() ? launcher_.outputShmName().c_str() : "");
+        break;
+    case 5:
+        if (lastInputW_ > 0)
+            sprintf_s(buf, "%d x %d", lastInputW_, lastInputH_);
+        else
+            buf[0] = '\0';
+        entries->values[0]->setString("input_size");
+        entries->values[1]->setString(buf);
+        break;
+    case 6:
+        entries->values[0]->setString("input_accepted");
+        entries->values[1]->setString(lastInputAccepted_ ? "yes" : "no");
         break;
     }
 }
@@ -246,6 +326,13 @@ void FluxRTTop::setupParameters(OP_ParameterManager* manager, void*) {
         np.maxSliders[0]    = 1.0;
         manager->appendFloat(np);
     }
+    {
+        OP_NumericParameter np("Liptransfer");
+        np.label            = "Lip Transfer";
+        np.page             = "Inference";
+        np.defaultValues[0] = 0.0;
+        manager->appendToggle(np);
+    }
 
     // ── Page: Reference ───────────────────────────────────────────────────────
 
@@ -270,7 +357,7 @@ void FluxRTTop::pulsePressed(const char* name, void*) {
         loadRequested_ = true;
     }
     else if (!strcmp(name, "Unload")) {
-        doUnload();
+        unloadRequested_ = true;
     }
 }
 
@@ -306,7 +393,8 @@ void FluxRTTop::doLoad(const OP_Inputs* inputs) {
     dllDir = dllDir.substr(0, dllDir.find_last_of("\\/"));
     std::string serverScript = dllDir + "\\fluxrt_server.py";
 
-    std::string workDir = (workDirPar && workDirPar[0]) ? workDirPar : dllDir;
+    workDir_ = (workDirPar && workDirPar[0]) ? workDirPar : dllDir;
+    std::string workDir = workDir_;
 
     LaunchConfig cfg;
     cfg.pythonExe    = pyExe    ? pyExe    : "";
@@ -325,7 +413,17 @@ void FluxRTTop::doLoad(const OP_Inputs* inputs) {
 void FluxRTTop::doUnload() {
     running_ = false;
     launcher_.stop();
-    prevDownRes_ = TD::OP_SmartRef<TD::OP_TOPDownloadResult>();
+    prevDownRes_    = TD::OP_SmartRef<TD::OP_TOPDownloadResult>();
+    prevRefDownRes_ = TD::OP_SmartRef<TD::OP_TOPDownloadResult>();
+    lastRefTotalCooks_ = -1;
+    if (!tempRefBmpPath_.empty()) {
+        DeleteFileA(tempRefBmpPath_.c_str());
+        tempRefBmpPath_.clear();
+    }
+    if (!prevRefBmpPath_.empty()) {
+        DeleteFileA(prevRefBmpPath_.c_str());
+        prevRefBmpPath_.clear();
+    }
 }
 
 void FluxRTTop::syncParams(const OP_Inputs* inputs) {
@@ -363,10 +461,19 @@ void FluxRTTop::syncParams(const OP_Inputs* inputs) {
         lastUseRef_ = useRef;
     }
 
-    const char* refPath = inputs->getParString("Referenceimage");
-    if (refPath && std::string(refPath) != lastRefPath_) {
-        ctrl_set_str(ctrl->reference_image_path, refPath);
-        lastRefPath_ = refPath;
+    bool lipTransfer = inputs->getParInt("Liptransfer") != 0;
+    if (lipTransfer != lastLipTransfer_) {
+        ctrl->lip_transfer_enable = lipTransfer ? 1 : 0;
+        lastLipTransfer_ = lipTransfer;
+    }
+
+    // Only use file param path when no reference TOP is wired to input 1
+    if (lastRefTotalCooks_ == -1) {
+        const char* refPath = inputs->getParString("Referenceimage");
+        if (refPath && std::string(refPath) != lastRefPath_) {
+            ctrl_set_str(ctrl->reference_image_path, refPath);
+            lastRefPath_ = refPath;
+        }
     }
 }
 
@@ -378,14 +485,59 @@ std::string FluxRTTop::statusString() const {
         case FLUXRT_STATUS_LOADING:   return "Loading...";
         case FLUXRT_STATUS_COMPILING: return "Compiling (first run ~3 min)...";
         case FLUXRT_STATUS_RUNNING:   return "Running";
-        case FLUXRT_STATUS_ERROR:     return std::string("Error: ") + ctrl->error_msg;
+        case FLUXRT_STATUS_ERROR: {
+            size_t len = strnlen_s(ctrl->error_msg, sizeof(ctrl->error_msg));
+            return std::string("Error: ") + std::string(ctrl->error_msg, len);
+        }
         default:                      return "Unknown";
     }
 }
 
+/*static*/ bool FluxRTTop::saveBgr24Bmp(const uint8_t* bgra, int w, int h,
+                                         const std::string& path) {
+    // BMP rows must be padded to a multiple of 4 bytes
+    const int rowPitch = ((w * 3 + 3) / 4) * 4;
+    const int dataSize = rowPitch * h;
+    const int fileSize = 54 + dataSize;
+
+    uint8_t hdr[54] = {};
+    auto w32 = [&](int off, uint32_t v) { memcpy(hdr + off, &v, 4); };
+    auto w16 = [&](int off, uint16_t v) { memcpy(hdr + off, &v, 2); };
+
+    // BITMAPFILEHEADER
+    hdr[0] = 'B'; hdr[1] = 'M';
+    w32(2,  (uint32_t)fileSize);
+    w32(10, 54);
+    // BITMAPINFOHEADER
+    w32(14, 40);
+    w32(18, (uint32_t)w);
+    w32(22, (uint32_t)h);   // positive = bottom-up (matches verticalFlip=false download)
+    w16(26, 1);
+    w16(28, 24);
+    w32(34, (uint32_t)dataSize);
+
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return false;
+
+    fwrite(hdr, 1, 54, f);
+
+    std::vector<uint8_t> row((size_t)rowPitch, 0);
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* src = bgra + (size_t)y * w * 4;
+        for (int x = 0; x < w; ++x) {
+            row[x * 3 + 0] = src[x * 4 + 0]; // B
+            row[x * 3 + 1] = src[x * 4 + 1]; // G
+            row[x * 3 + 2] = src[x * 4 + 2]; // R
+        }
+        fwrite(row.data(), 1, (size_t)rowPitch, f);
+    }
+    fclose(f);
+    return true;
+}
+
 /*static*/ void FluxRTTop::bgraToShm(const uint8_t* bgra, uint8_t* bgr, int w, int h) {
-    const int pixels = w * h;
-    for (int i = 0; i < pixels; ++i) {
+    const size_t pixels = (size_t)w * h;
+    for (size_t i = 0; i < pixels; ++i) {
         bgr[i * 3 + 0] = bgra[i * 4 + 0]; // B
         bgr[i * 3 + 1] = bgra[i * 4 + 1]; // G
         bgr[i * 3 + 2] = bgra[i * 4 + 2]; // R
@@ -393,8 +545,8 @@ std::string FluxRTTop::statusString() const {
 }
 
 /*static*/ void FluxRTTop::shmToBgra(const uint8_t* bgr, uint8_t* bgra, int w, int h) {
-    const int pixels = w * h;
-    for (int i = 0; i < pixels; ++i) {
+    const size_t pixels = (size_t)w * h;
+    for (size_t i = 0; i < pixels; ++i) {
         bgra[i * 4 + 0] = bgr[i * 3 + 0]; // B
         bgra[i * 4 + 1] = bgr[i * 3 + 1]; // G
         bgra[i * 4 + 2] = bgr[i * 3 + 2]; // R
