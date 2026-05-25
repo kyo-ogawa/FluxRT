@@ -40,8 +40,8 @@ if (-not $uvExe) {
 Emit "UV: $uvExe"
 
 # ── 2. Create virtual environment ─────────────────────────────────────────────
-Emit "Creating .venv..."
-& $uvExe venv .venv
+Emit "Creating/updating .venv..."
+& $uvExe venv --clear .venv
 if ($LASTEXITCODE -ne 0) { Write-Output "INSTALL_ERROR: uv venv failed"; exit 1 }
 
 # ── 3. PyTorch (CUDA 12.8) ────────────────────────────────────────────────────

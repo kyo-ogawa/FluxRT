@@ -78,8 +78,7 @@ void FluxRTTop::execute(TOP_Output* output, const OP_Inputs* inputs, void*) {
     if (installRequested_.exchange(false)) {
         doInstall(inputs);
     }
-    if (loadRequested_ && !installing_) {
-        loadRequested_ = false;
+    if (!installing_ && loadRequested_.exchange(false)) {
         doLoad(inputs);
     }
 
