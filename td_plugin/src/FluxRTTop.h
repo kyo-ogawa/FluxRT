@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <mutex>
 
 class FluxRTTop : public TD::TOP_CPlusPlusBase {
 public:
@@ -66,6 +67,18 @@ private:
     int  lastInputW_        = 0;
     int  lastInputH_        = 0;
     bool lastInputAccepted_ = false;
+
+    // Install state
+    void        doInstall(const TD::OP_Inputs* inputs);
+    static DWORD WINAPI installReaderThread(LPVOID param);
+
+    HANDLE              installProcess_    = nullptr;
+    HANDLE              installThread_     = nullptr;
+    HANDLE              installStdoutRead_ = nullptr;
+    mutable std::mutex  installMutex_;
+    std::string         installStatus_;
+    std::atomic<bool>   installing_        {false};
+    std::atomic<bool>   installRequested_  {false};
 
     // Reference TOP (input 1)
     int64_t lastRefTotalCooks_ = -1;

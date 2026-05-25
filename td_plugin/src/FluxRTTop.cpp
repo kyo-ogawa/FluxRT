@@ -4,6 +4,12 @@
 
 using namespace TD;
 
+struct InstallReaderCtx {
+    HANDLE      hPipe;
+    std::mutex* mutex;
+    std::string* status;
+};
+
 extern "C" {
 
 DLLEXPORT void FillTOPPluginInfo(TOP_PluginInfo* info) {
@@ -38,6 +44,15 @@ FluxRTTop::FluxRTTop(const OP_NodeInfo* info, TOP_Context* context)
 
 FluxRTTop::~FluxRTTop() {
     doUnload();
+    if (installProcess_) {
+        TerminateProcess(installProcess_, 1);
+        CloseHandle(installProcess_);
+    }
+    if (installThread_) {
+        WaitForSingleObject(installThread_, 2000);
+        CloseHandle(installThread_);
+    }
+    if (installStdoutRead_) CloseHandle(installStdoutRead_);
 }
 
 // ── General info ──────────────────────────────────────────────────────────────
@@ -55,8 +70,31 @@ void FluxRTTop::execute(TOP_Output* output, const OP_Inputs* inputs, void*) {
     if (unloadRequested_.exchange(false)) {
         doUnload();
     }
-    if (loadRequested_.exchange(false)) {
+    if (installRequested_.exchange(false)) {
+        doInstall(inputs);
+    }
+    if (loadRequested_.exchange(false) && !installing_) {
         doLoad(inputs);
+    }
+
+    // Poll install process completion
+    if (installing_ && installProcess_) {
+        DWORD exitCode = STILL_ACTIVE;
+        GetExitCodeProcess(installProcess_, &exitCode);
+        if (exitCode != STILL_ACTIVE) {
+            if (installThread_) {
+                WaitForSingleObject(installThread_, 2000);
+                CloseHandle(installThread_);
+                installThread_ = nullptr;
+            }
+            if (installStdoutRead_) {
+                CloseHandle(installStdoutRead_);
+                installStdoutRead_ = nullptr;
+            }
+            CloseHandle(installProcess_);
+            installProcess_ = nullptr;
+            installing_ = false;
+        }
     }
 
     // ── 2. Sync params ───────────────────────────────────────────────────────
@@ -182,7 +220,7 @@ void FluxRTTop::execute(TOP_Output* output, const OP_Inputs* inputs, void*) {
 }
 
 bool FluxRTTop::getInfoDATSize(OP_InfoDATSize* infoSize, void*) {
-    infoSize->rows     = 7;
+    infoSize->rows     = 8;
     infoSize->cols     = 2;
     infoSize->byColumn = false;
     return true;
@@ -228,6 +266,16 @@ void FluxRTTop::getInfoDATEntries(int32_t index, int32_t,
         entries->values[0]->setString("input_accepted");
         entries->values[1]->setString(lastInputAccepted_ ? "yes" : "no");
         break;
+    case 7: {
+        entries->values[0]->setString("install_status");
+        std::string s;
+        {
+            std::lock_guard<std::mutex> lk(installMutex_);
+            s = installStatus_;
+        }
+        entries->values[1]->setString(s.c_str());
+        break;
+    }
     }
 }
 
@@ -243,6 +291,12 @@ void FluxRTTop::setupParameters(OP_ParameterManager* manager, void*) {
     {
         OP_NumericParameter np("Unload");
         np.label = "Unload";
+        np.page  = "Setup";
+        manager->appendPulse(np);
+    }
+    {
+        OP_NumericParameter np("Installuv");
+        np.label = "Install / Update";
         np.page  = "Setup";
         manager->appendPulse(np);
     }
@@ -359,6 +413,9 @@ void FluxRTTop::pulsePressed(const char* name, void*) {
     else if (!strcmp(name, "Unload")) {
         unloadRequested_ = true;
     }
+    else if (!strcmp(name, "Installuv")) {
+        installRequested_ = true;
+    }
 }
 
 void FluxRTTop::doLoad(const OP_Inputs* inputs) {
@@ -423,6 +480,104 @@ void FluxRTTop::doUnload() {
     if (!prevRefBmpPath_.empty()) {
         DeleteFileA(prevRefBmpPath_.c_str());
         prevRefBmpPath_.clear();
+    }
+}
+
+/*static*/ DWORD WINAPI FluxRTTop::installReaderThread(LPVOID param) {
+    auto* ctx = static_cast<InstallReaderCtx*>(param);
+    char buf[512];
+    DWORD bytesRead;
+    std::string partial;
+
+    while (ReadFile(ctx->hPipe, buf, sizeof(buf) - 1, &bytesRead, nullptr)
+           && bytesRead > 0)
+    {
+        buf[bytesRead] = '\0';
+        partial += buf;
+        size_t pos;
+        while ((pos = partial.find('\n')) != std::string::npos) {
+            std::string line = partial.substr(0, pos);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) {
+                std::lock_guard<std::mutex> lk(*ctx->mutex);
+                *ctx->status = line;
+            }
+            partial = partial.substr(pos + 1);
+        }
+    }
+    delete ctx;
+    return 0;
+}
+
+void FluxRTTop::doInstall(const TD::OP_Inputs* inputs) {
+    if (installing_) return;
+
+    // Resolve DLL directory (install_uv.ps1 lives next to the DLL)
+    char dllPath[MAX_PATH] = {};
+    HMODULE hMod = nullptr;
+    GetModuleHandleExA(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCSTR>(&FillTOPPluginInfo), &hMod);
+    GetModuleFileNameA(hMod, dllPath, MAX_PATH);
+    std::string dllDir = dllPath;
+    dllDir = dllDir.substr(0, dllDir.find_last_of("\\/"));
+    std::string scriptPath = dllDir + "\\install_uv.ps1";
+
+    const char* workDirPar = inputs->getParString("Workdir");
+    std::string workDir = (workDirPar && workDirPar[0]) ? workDirPar : dllDir;
+
+    // Pipe for stdout/stderr
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength        = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE hWrite = nullptr;
+    if (!CreatePipe(&installStdoutRead_, &hWrite, &sa, 0)) {
+        std::lock_guard<std::mutex> lk(installMutex_);
+        installStatus_ = "ERROR: CreatePipe failed";
+        return;
+    }
+    SetHandleInformation(installStdoutRead_, HANDLE_FLAG_INHERIT, 0);
+
+    std::string cmd = "powershell.exe -NonInteractive -ExecutionPolicy Bypass -File \""
+                    + scriptPath + "\" -WorkDir \"" + workDir + "\"";
+    std::vector<char> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back('\0');
+
+    STARTUPINFOA si = {};
+    si.cb         = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdOutput = hWrite;
+    si.hStdError  = hWrite;
+
+    PROCESS_INFORMATION pi = {};
+    BOOL ok = CreateProcessA(
+        nullptr, cmdBuf.data(),
+        nullptr, nullptr, TRUE,
+        CREATE_NO_WINDOW, nullptr,
+        workDir.c_str(), &si, &pi);
+
+    CloseHandle(hWrite);
+
+    if (!ok) {
+        CloseHandle(installStdoutRead_);
+        installStdoutRead_ = nullptr;
+        std::lock_guard<std::mutex> lk(installMutex_);
+        installStatus_ = "ERROR: CreateProcess failed";
+        return;
+    }
+
+    installProcess_ = pi.hProcess;
+    CloseHandle(pi.hThread);
+
+    auto* ctx = new InstallReaderCtx{installStdoutRead_, &installMutex_, &installStatus_};
+    installThread_ = CreateThread(nullptr, 0, installReaderThread, ctx, 0, nullptr);
+
+    installing_ = true;
+    {
+        std::lock_guard<std::mutex> lk(installMutex_);
+        installStatus_ = "Installing...";
     }
 }
 
