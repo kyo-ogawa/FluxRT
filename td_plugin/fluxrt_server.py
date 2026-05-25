@@ -99,6 +99,10 @@ class CtrlBlock:
     def output_ready(self) -> bool:
         return bool(self._buf[1551])
 
+    @property
+    def lip_transfer_enable(self) -> bool:
+        return bool(self._buf[1809])
+
     # ── write properties ───────────────────────────────────────────────────
 
     @input_ready.setter
@@ -108,10 +112,6 @@ class CtrlBlock:
     @output_ready.setter
     def output_ready(self, value: bool):
         self._buf[1551] = int(value)
-
-    @property
-    def lip_transfer_enable(self) -> bool:
-        return bool(self._buf[1809])
 
     @property
     def status(self) -> int:
